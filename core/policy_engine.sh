@@ -6,10 +6,28 @@ FGC_MODDIR="${FGC_MODDIR:-${0%/*}/..}"
 . "${FGC_MODDIR}/core/paths.sh"
 . "${FGC_MODDIR}/core/str.sh"
 
-# Universal critical packages — never cleaned on ANY device/ROM.
-# Brand/launcher names are NOT hardcoded here; the detected launcher is
-# appended dynamically via state/protected_extra.txt (see core/caps.sh).
+# Universal critical packages — never cleaned on ANY device/ROM. These are
+# AOSP-defined identities (framework/UI/telephony/shell) verified to exist as
+# system packages across supported Android API levels; they are NOT a
+# brand-specific list. Additional runtime protections are built from VERIFIED
+# package metadata, not names:
+#   - state/protected_extra.txt : detected launcher (core/caps.sh probe)
+#   - state/.syspkgs            : `pm list packages -s` snapshot -> system-type
+#     packages are never frozen and only killed under explicit profiles.
 FGC_PROTECTED_BASE="android com.android.systemui com.android.phone com.android.shell"
+
+fgc_is_core_service() {
+  # $1 = pkg -> 0 when it is a core system identity that must NEVER be
+  # force-stopped/frozen regardless of profile or user list edits. Built from
+  # the universal base + dynamically detected launcher (verified at runtime).
+  _p="$1"
+  [ -n "$_p" ] || return 1
+  for _s in $FGC_PROTECTED_BASE; do [ "$_p" = "$_s" ] && return 0; done
+  if [ -f "$FGC_STATE/protected_extra.txt" ]; then
+    grep -qx "$_p" "$FGC_STATE/protected_extra.txt" 2>/dev/null && return 0
+  fi
+  return 1
+}
 
 fgc_is_whitelisted() {
   # exact match against whitelist.txt (ignores # comments, ! disabled, blank)

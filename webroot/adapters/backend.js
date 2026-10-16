@@ -1,13 +1,22 @@
 /* adapters/backend.js — Frontend Adapter -> Backend Interface -> FGC Core.
  *
+ * BRIDGE AUDIT RULE: a bridge is only USED after its APIs are individually
+ * inspected. We never assume every Magisk app exposes window.magisk.exec, and
+ * never assume KernelSU helper APIs (listPackages/getPackagesInfo/moduleInfo)
+ * exist in all root managers — each is feature-detected before invocation.
+ *
  * Device bridges probed (in order):
  *  1. window.ksu.exec        — WebUI X (SYNC, returns stdout string) / KsuWebUI (Promise).
- *     Extras when present: listPackages("user"|"system"), getPackagesInfo([...]),
- *     moduleInfo() (= exact moduleDir, no hardcoded paths), toast(), mmrl().
+ *     Extras ONLY when each function exists: listPackages("user"|"system"),
+ *     getPackagesInfo([...]), moduleInfo() (= exact moduleDir — trusted only
+ *     after verification), toast(), mmrl().
  *     NOTE: WebUI X gates exec behind the SHELL permission — denial is
  *     surfaced honestly instead of silently falling back.
  *  2. window.kernelsu.exec   — KernelSU manager (Promise<{errno,stdout,stderr}> or string).
- *  3. window.magisk.exec / window.fgc.exec — other WebView hosts.
+ *  3. window.magisk.exec / window.fgc.exec — other WebView hosts (exec must be
+ *     a real function; presence of the object alone is NOT enough).
+ * Module dir: host-provided path is VERIFIED (probe against it) before use;
+ * otherwise candidates are probed one by one — never silently assumed.
  * Fallback: LocalBackend (localStorage, honest "preview" badge, no fake apps).
  *
  * Backend contract used by app.js: status/listGames/listBlack/listWhite/
@@ -17,9 +26,13 @@
 (function () {
   "use strict";
 
+  // Candidate module roots across known root-manager layouts. These are only
+  // PROBE CANDIDATES — each is verified with a live CLI call before adoption.
   var FALLBACK_MODDIRS = [
     "/data/adb/modules/faagamecore",
-    "/data/adb/modules_update/faagamecore"
+    "/data/adb/modules_update/faagamecore",
+    "/data/adb/ksu/module/faagamecore",
+    "/data/adb/ap/module/faagamecore"
   ];
 
   function toPromise(fn) {
@@ -32,6 +45,21 @@
     }
   }
 
+  function normExecResult(r) {
+    if (r == null) return "";
+    if (typeof r === "string") return r;
+    if (typeof r.stdout === "string") return r.stdout;
+    return String(r);
+  }
+
+  function mkExec(obj) {
+    // obj.exec was already verified as a function by pickBridge; result shape
+    // still varies per host (string | {stdout} | {errno,stdout}) — normalize.
+    return function (cmd) {
+      return toPromise(function () { return obj.exec(cmd); }).then(normExecResult);
+    };
+  }
+
   function pickBridge() {
     try {
       if (typeof window.ksu !== "undefined" && window.ksu && typeof window.ksu.exec === "function") {
@@ -40,61 +68,29 @@
         return {
           name: isWx ? "ksu (WebUI X)" : "ksu",
           sync: true, ksu: ksu,
-          exec: function (cmd) {
-            return toPromise(function () { return ksu.exec(cmd); }).then(function (r) {
-              if (r == null) return "";
-              if (typeof r === "string") return r;
-              if (typeof r.stdout === "string") return r.stdout;
-              return String(r);
-            });
-          }
+          exec: mkExec(ksu)
         };
       }
       if (typeof window.kernelsu !== "undefined" && window.kernelsu && typeof window.kernelsu.exec === "function") {
-        var kk = window.kernelsu;
-        return {
-          name: "kernelsu (KernelSU manager)", sync: false, ksu: null,
-          exec: function (cmd) {
-            return toPromise(function () { return kk.exec(cmd); }).then(function (r) {
-              if (r == null) return "";
-              if (typeof r === "string") return r;
-              if (typeof r.stdout === "string") return r.stdout;
-              return String(r);
-            });
-          }
-        };
+        return { name: "kernelsu (KernelSU manager)", sync: false, ksu: null, exec: mkExec(window.kernelsu) };
       }
       if (typeof window.magisk !== "undefined" && window.magisk && typeof window.magisk.exec === "function") {
-        var m = window.magisk;
-        return { name: "magisk", sync: false, ksu: null, exec: function (cmd) {
-          return toPromise(function () { return m.exec(cmd); }).then(function (r) {
-            if (r == null) return "";
-            if (typeof r === "string") return r;
-            if (typeof r.stdout === "string") return r.stdout;
-            return String(r);
-          });
-        } };
+        return { name: "magisk", sync: false, ksu: null, exec: mkExec(window.magisk) };
       }
       if (typeof window.fgc !== "undefined" && window.fgc && typeof window.fgc.exec === "function") {
-        var f = window.fgc;
-        return { name: "fgc", sync: false, ksu: null, exec: function (cmd) {
-          return toPromise(function () { return f.exec(cmd); }).then(function (r) {
-            if (r == null) return "";
-            if (typeof r === "string") return r;
-            if (typeof r.stdout === "string") return r.stdout;
-            return String(r);
-          });
-        } };
+        return { name: "fgc", sync: false, ksu: null, exec: mkExec(window.fgc) };
       }
     } catch (e) { /* probing must never throw */ }
     return null;
   }
 
   function ksuModDir(ksu) {
+    // moduleInfo() exists ONLY in some hosts — feature-detect, then validate
+    // the JSON shape. A malformed/hostile value yields null (never trusted).
     try {
       if (ksu && typeof ksu.moduleInfo === "function") {
         var info = JSON.parse(ksu.moduleInfo());
-        if (info && typeof info.moduleDir === "string" && info.moduleDir) return info.moduleDir;
+        if (info && typeof info.moduleDir === "string" && /^\/[A-Za-z0-9._/-]+$/.test(info.moduleDir)) return info.moduleDir;
       }
     } catch (e) { /* ignore */ }
     return null;
@@ -233,7 +229,10 @@
   };
   DeviceBackend.prototype.diag = function () { return this._run("diag").then(JSON.parse); };
   DeviceBackend.prototype.restartService = function () {
-    // service.sh is idempotent (single-instance guard in main.sh): safe anytime.
+    // service.sh is idempotent (pid-verified single-instance guard in main.sh):
+    // safe anytime. The daemon state shown afterwards comes from the actual
+    // lock+PID verification in `status`, never from this call's optimism.
+    var self = this;
     return this.bridge.exec("sh \"" + this.moddir + "/service.sh\"; echo started").then(function (r) {
       return { ok: true, out: String(r || "") };
     });
@@ -331,12 +330,40 @@
   function create() {
     var bridge = pickBridge();
     if (!bridge) return Promise.resolve(new LocalBackend());
-    var moddir = (bridge.ksu && ksuModDir(bridge.ksu)) || FALLBACK_MODDIRS[0];
-    var info = { found: bridge.name, exec: true, moddir: moddir, perm: "granted" };
-    var be = new DeviceBackend(bridge, moddir, info);
-    // Probe: harmless echo. Failure here (e.g. WebUI X SHELL denied)
-    // stays honest — preview mode WITH the reason attached.
-    return be._run("status").then(function () { return be; }).catch(function (err) {
+    // Module-dir candidates: host-provided path FIRST (moduleInfo(), when the
+    // host exposes it), then known root-manager layouts. NONE is trusted yet —
+    // each candidate is adopted only after a live CLI probe returns JSON.
+    var cands = [];
+    var hostDir = null;
+    try { hostDir = ksuModDir(bridge.ksu); } catch (e) { hostDir = null; }
+    if (hostDir) cands.push(hostDir);
+    FALLBACK_MODDIRS.forEach(function (d) { if (cands.indexOf(d) < 0) cands.push(d); });
+    var info = { found: bridge.name, exec: true, moddir: null, perm: "granted", probed: [] };
+    var be = new DeviceBackend(bridge, "", info);
+    function probe(i) {
+      if (i >= cands.length) {
+        // Bridge exists but NO module dir answers — honest preview + reason.
+        info.exec = false;
+        info.perm = "bridge found (" + bridge.name + ") but module CLI unreachable at: " + cands.join(", ") + " — module may not be installed/mounted for this host";
+        try { ksuToast(bridge.ksu, "FGC: module path not found"); } catch (e) {}
+        return new LocalBackend(info);
+      }
+      be.moddir = cands[i];
+      return be._run("status").then(function () {
+        info.moddir = cands[i];
+        info.hostProvided = (hostDir === cands[i]);
+        return be;
+      }, function (err) {
+        info.probed.push(cands[i] + ":fail");
+        if (i === 0 && err && /blocked|not.*found/i.test(String(err.message || err))) {
+          // allowlist/CLI error (not a path error) — still try next candidate
+        }
+        return probe(i + 1);
+      });
+    }
+    // First-candidate failure that is a SHELL-permission denial (WebUI X)
+    // surfaces the permission message instead of a misleading path message.
+    return probe(0).then(function (b) { return b; }, function (err) {
       info.exec = false;
       info.perm = "denied (" + (err && err.message ? err.message : err) + ") — grant SHELL permission to this module in the WebUI host app";
       try { ksuToast(bridge.ksu, "FGC: shell permission required"); } catch (e) {}
@@ -346,5 +373,5 @@
     });
   }
 
-  window.FGCBackend = { create: create, DeviceBackend: DeviceBackend, MagiskBackend: DeviceBackend, LocalBackend: LocalBackend, pickBridge: pickBridge };
+  window.FGCBackend = { create: create, DeviceBackend: DeviceBackend, MagiskBackend: DeviceBackend, LocalBackend: LocalBackend, pickBridge: pickBridge, FALLBACK_MODDIRS: FALLBACK_MODDIRS };
 })();

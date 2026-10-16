@@ -8,6 +8,8 @@ CORE_DIR="$FGC_MODDIR/core"
 . "$CORE_DIR/policy_engine.sh"
 . "$CORE_DIR/logger.sh"
 . "$CORE_DIR/paths.sh"
+# shellcheck disable=SC1091
+. "$CORE_DIR/caps_helpers.sh"
 
 fgc_pkg_running() {
   # $1 = pkg ; 0 if any process matches exact package (file-based, no pipe)
@@ -53,7 +55,10 @@ fgc_freeze() {
     if [ "$(fgc_pkg_type "$_p")" != "user" ]; then fgc_log "CLEANUP_SKIPPED" "$_p" "freeze" "skipped" "system-type-nofreeze"; continue; fi
     if fgc_dry_run; then fgc_log "CLEANUP_SKIPPED" "$_p" "freeze" "skipped" "dry-run"; continue; fi
     if grep -qx "package:$_p" "$_fdl" 2>/dev/null; then fgc_log "CLEANUP_SKIPPED" "$_p" "freeze" "skipped" "already-disabled"; continue; fi
-    if fgc_run_timed 20 pm disable-user --user 0 "$_p" 2>/dev/null; then
+    # capability-gated: pm disable-user was VERIFIED by the last caps probe;
+    # unsupported environments skip freeze honestly (force-stop still applies).
+    fgc_cap_enabled freeze || { fgc_log "CLEANUP_SKIPPED" "$_p" "freeze" "skipped" "$(fgc_cap_fail_msg freeze)"; continue; }
+    if fgc_pm_disable_user "$_p"; then
       fgc_log "CLEANUP_SUCCESS" "$_p" "freeze" "frozen" ""
       fgc_frozen_add "$_p"
     else
@@ -76,7 +81,15 @@ fgc_unfreeze_all() {
     [ "$_kind" = "entry" ] || continue
     _p="$_norm"
     [ -n "$_p" ] || continue
-    if fgc_run_timed 20 pm enable --user 0 "$_p" 2>/dev/null; then
+    # If the freeze capability is currently unavailable, we cannot restore —
+    # keep ALL entries for a later retry (never drop them silently).
+    if ! fgc_cap_enabled freeze; then
+      fgc_log "$_ev" "$_p" "unfreeze" "skipped" "$(fgc_cap_fail_msg freeze)"
+      _keep="$_keep$_p
+"
+      continue
+    fi
+    if fgc_pm_enable "$_p"; then
       fgc_log "$_ev" "$_p" "unfreeze" "enabled" ""
     else
       # grep -c consumes all input (no early exit) -> always terminates
@@ -108,7 +121,13 @@ fgc_cleanup() {
     if [ -n "$_game" ] && [ "$_p" = "$_game" ]; then fgc_log "CLEANUP_SKIPPED" "$_p" "force-stop" "skipped" "foreground-game"; _skip=$((_skip+1)); continue; fi
     if ! fgc_pkg_running "$_p"; then fgc_log "CLEANUP_SKIPPED" "$_p" "force-stop" "skipped" "not-running"; _skip=$((_skip+1)); continue; fi
     if fgc_dry_run; then fgc_log "CLEANUP_SKIPPED" "$_p" "force-stop" "dry-run" ""; _skip=$((_skip+1)); continue; fi
-    if fgc_run_timed 30 am force-stop "$_p" 2>/dev/null; then fgc_log "CLEANUP_SUCCESS" "$_p" "force-stop" "stopped" ""; _ok=$((_ok+1)); else fgc_log "CLEANUP_FAILED" "$_p" "force-stop" "failed" "am-error"; _fail=$((_fail+1)); fi
+    # capability-gated: am force-stop was VERIFIED by the last caps probe.
+    # Unsupported environments report failure honestly (never a fake success).
+    if ! fgc_cap_enabled kill; then
+      fgc_log "CLEANUP_SKIPPED" "$_p" "force-stop" "skipped" "$(fgc_cap_fail_msg kill)"
+      _skip=$((_skip+1)); continue
+    fi
+    if fgc_am_force_stop "$_p"; then fgc_log "CLEANUP_SUCCESS" "$_p" "force-stop" "stopped" ""; _ok=$((_ok+1)); else fgc_log "CLEANUP_FAILED" "$_p" "force-stop" "failed" "am-error"; _fail=$((_fail+1)); fi
   done
   echo "$_ok stopped, $_skip skipped, $_fail failed"
 }
