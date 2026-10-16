@@ -13,9 +13,12 @@ FGC_MODDIR="${FGC_MODDIR:-${0%/*}/..}"
 . "${FGC_MODDIR}/core/str.sh"
 
 fgc_fg_disabled_by_caps() {
-  # 0 = last caps snapshot explicitly reported foreground:none
+  # 0 = last caps snapshot explicitly reported foreground detection as NOT
+  # working (anything other than a verified source value: none, unknown,
+  # dumpsys-present-unverified, ...). Only "activity"/"window" enable it.
   [ -f "$FGC_STATE/caps.json" ] || return 1
-  grep -q '"foreground":"none"' "$FGC_STATE/caps.json" 2>/dev/null
+  grep -q '"foreground":"activity"\|"foreground":"window"' "$FGC_STATE/caps.json" 2>/dev/null && return 1
+  grep -q '"foreground":"' "$FGC_STATE/caps.json" 2>/dev/null
 }
 
 fgc_foreground_pkg() {

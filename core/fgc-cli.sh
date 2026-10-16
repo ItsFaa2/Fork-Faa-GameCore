@@ -275,8 +275,15 @@ cmd_diag() {
   _files=""; for _f in config/config.json config/gamelist.json config/blacklist.txt config/whitelist.txt core/main.sh core/caps.sh core/device.sh core/str.sh core/policy_engine.sh; do
     if ls "$MODDIR/${_f%/*}" 2>/dev/null | grep -qx "${_f##*/}"; then _files="$_files $_f:ok"; else _files="$_files $_f:missing"; fi
   done
+  # Capability display: the daemon/boot pipeline (core/caps.sh -> fgc_detect_caps)
+  # owns state/caps.json — exactly one key per field, no merge corruption
+  # possible. If no snapshot exists yet (fresh install before first boot pass),
+  # run the full detection inline here: it is hang-safe (file-redirected probes,
+  # bounded by fgc_run_timed) and persists the result for every consumer
+  # (foreground gate, kill/freeze gates). Displayed values are NEVER fabricated:
+  # each reflects a real probe run either now or at last detection.
   _caps="$(cat "$FGC_STATE/caps.json" 2>/dev/null)"
-  [ -n "$_caps" ] || _caps="$(fgc_detect_caps 2>/dev/null)"
+  case "$_caps" in '{'*'}'*) ;; *) _caps="$(fgc_detect_caps 2>/dev/null)";; esac
   [ -n "$_caps" ] || _caps='{"foreground":"unknown"}'
   _jv="$(fgc_java ping 2>/dev/null)"
   _jh=no; [ "$_jv" = "pong" ] && _jh=yes
@@ -285,7 +292,6 @@ cmd_diag() {
   _dev="$(fgc_device_json 2>/dev/null)"; [ -n "$_dev" ] || _dev='{"manufacturer":"Unknown","model":"Unknown","android":"Unknown","sdk":"Unknown","root":"Not detected"}'
   printf '{"commands":"%s","session_lock":"%s","files":"%s","boot_completed":"%s","caps":%s,"device":%s}\n' "$_ok" "$(jesc "$_lock")" "$_files" "$(getprop sys.boot_completed 2>/dev/null)" "$_caps" "$_dev"
 }
-
 case "$1" in
   status) cmd_status ;;
   list) shift; cmd_list "$@" ;;

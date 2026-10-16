@@ -84,10 +84,18 @@ sh "$CORE_DIR/recovery.sh" >/dev/null 2>&1 || true
 . "$CORE_DIR/caps.sh"
 FGC_CAPS_JSON="$(fgc_detect_caps 2>/dev/null)"
 case "$FGC_CAPS_JSON" in
-  *'"foreground":"none"'*)
+  *'"foreground":"activity"'*|*'"foreground":"window"'*) ;;
+  *)
+    # No verified foreground source (none / unknown / dumpsys-present-
+    # unverified): report the limitation honestly and disable ONLY game-
+    # session detection. Never a fake detection.
     fgc_log "CORE_ERROR" "" "daemon" "no-foreground-source" "foreground detection unavailable; game-session detection disabled (graceful degradation)" ;;
+esac
+case "$FGC_CAPS_JSON" in
   *'"kill":"none"'*)
     fgc_log "CORE_WARN" "" "daemon" "no-kill-capability" "am force-stop unsupported; cleanup skipped honestly" ;;
+  esac
+case "$FGC_CAPS_JSON" in
   *'"freeze":"none"'*)
     fgc_log "CORE_WARN" "" "daemon" "no-freeze-capability" "pm disable-user/enable unsupported; freeze feature disabled" ;;
 esac
