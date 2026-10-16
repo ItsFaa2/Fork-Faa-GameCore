@@ -542,7 +542,7 @@
         var cls = v === "yes" ? "b-green" : "b-red";
         return '<div class="kv"><span class="mono">' + esc(k) + '</span><b><span class="badge ' + cls + '">' + esc(v) + "</span></b></div>";
       }).join("");
-      var fgNote = { none: "deteksi dinonaktifkan (graceful)", activity: "ok", window: "ok (fallback)" }[caps.foreground] || esc(caps.foreground || "?");
+      var fgNote = { none: "deteksi dinonaktifkan (graceful)", unknown: "belum terdeteksi", "dumpsys-present-unverified": "deteksi dinonaktifkan (graceful)", activity: "ok", window: "ok (fallback)" }[caps.foreground] || esc(caps.foreground || "?");
       $("diagDevBox").innerHTML =
         '<div class="kv"><span>Manufacturer</span><b>' + esc(dev.manufacturer || "Unknown") + "</b></div>" +
         '<div class="kv"><span>Model</span><b>' + esc(dev.model || "Unknown") + "</b></div>" +

@@ -7,12 +7,15 @@
 # Sourced, not executed.
 
 # fgc_cap_enabled <key> -> 0 when caps.json reports the key as working
-#   foreground -> "ok" | pkg_query -> "pm" | kill -> "am" | freeze -> "pm"
+#   foreground -> "activity"|"window" | pkg_query -> "pm" | kill -> "am" | freeze -> "pm"
 fgc_cap_enabled() {
+  # Accepted "working" values per key: presence of a concrete verified
+  # backend name (kill:"am", freeze:"pm", pkg_query:"pm") or a verified
+  # foreground SOURCE ("activity"/"window") — never bare truthy strings.
   _ck="$1"
   [ -f "$FGC_STATE/caps.json" ] || return 1
   case "$_ck" in
-    foreground) grep -q '"foreground":"ok"' "$FGC_STATE/caps.json" 2>/dev/null ;;
+    foreground) grep -q '"foreground":"activity"\|"foreground":"window"' "$FGC_STATE/caps.json" 2>/dev/null ;;
     *) grep -q "\"$_ck\":\"pm\"\|\"$_ck\":\"am\"" "$FGC_STATE/caps.json" 2>/dev/null ;;
   esac
 }
