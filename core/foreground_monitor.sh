@@ -1,14 +1,26 @@
 #!/system/bin/sh
 # foreground_monitor.sh — prints current foreground package (single shot, no loop).
-# Tries dumpsys activity (root ok), falls back to dumpsys window.
-# dumpsys calls are time-bounded (they can block under system contention).
+# Tries dumpsys activity, falls back to dumpsys window. dumpsys calls are
+# time-bounded (they can block under system contention).
+# GRACEFUL DEGRADATION: when the last capability probe (state/caps.json) says
+# foreground detection is unavailable ("none"), this returns empty WITHOUT
+# running probes — the feature stays disabled until caps are re-detected
+# (boot/recovery/daemon start), and the daemon reports IDLE honestly instead
+# of faking a game detection.
 
 FGC_MODDIR="${FGC_MODDIR:-${0%/*}/..}"
 . "${FGC_MODDIR}/core/paths.sh"
 . "${FGC_MODDIR}/core/str.sh"
 
+fgc_fg_disabled_by_caps() {
+  # 0 = last caps snapshot explicitly reported foreground:none
+  [ -f "$FGC_STATE/caps.json" ] || return 1
+  grep -q '"foreground":"none"' "$FGC_STATE/caps.json" 2>/dev/null
+}
+
 fgc_foreground_pkg() {
   command -v dumpsys >/dev/null 2>&1 || return 0
+  fgc_fg_disabled_by_caps && return 0
   _out="$(fgc_run_timed 10 dumpsys activity activities 2>/dev/null | grep -m1 'mFocusedApp\|ResumedActivity' )"
   if [ -z "$_out" ]; then
     _out="$(fgc_run_timed 10 dumpsys window windows 2>/dev/null | grep -m1 'mCurrentFocus\|mFocusedApp')"
